@@ -58,7 +58,6 @@ public:
     grid_map_pub_ = this->create_publisher<grid_map_msgs::msg::GridMap>("/acre/sdf_cbf", 10);
 
     // create map
-    // map_.add("elevation");
     map_.add("obstacle");
     map_.add("obstacle_inflated");
     map_.add("observed", 0.0f);   // 0 = not observed, 1 = observed
@@ -110,13 +109,13 @@ private:
       RCLCPP_ERROR(this->get_logger(), "resolution must be > 0, got %f.", resolution_);
       throw std::runtime_error("Invalid resolution parameter");
     }
-    this->declare_parameter("size_x", 3.0);
+    this->declare_parameter("size_x", 5.08);
     this->get_parameter("size_x", size_x_);
     if (size_x_ <= 0.0) {
       RCLCPP_ERROR(this->get_logger(), "size_x must be > 0, got %f.", size_x_);
       throw std::runtime_error("Invalid size_x parameter");
     }
-    this->declare_parameter("size_y", 3.0);
+    this->declare_parameter("size_y", 4.78);
     this->get_parameter("size_y", size_y_);
     if (size_y_ <= 0.0) {
       RCLCPP_ERROR(this->get_logger(), "size_y must be > 0, got %f.", size_y_);
@@ -131,7 +130,7 @@ private:
       throw std::runtime_error("Invalid sigma parameter");
     }
 
-    this->declare_parameter("obstacle_inflation", 0.05);
+    this->declare_parameter("obstacle_inflation", 0.00);
     this->get_parameter("obstacle_inflation", obstacle_inflation_);
     if (obstacle_inflation_ < 0.0) {
       RCLCPP_ERROR(this->get_logger(), "obstacle_inflation must be >= 0, got %f.", obstacle_inflation_);
@@ -227,7 +226,6 @@ private:
 
     // Mark cells that contain points from the PC as occupied
     for (const auto& ep : endpoints) {
-      // map_.at("elevation", ep.index) = ep.elevation;
       map_.at("observed", ep.index) = OBSERVED; // mark the cell as observed
       map_.at("obstacle", ep.index) = ep.occupied ? OCCUPIED_VALUE : FREE_VALUE;
     }
