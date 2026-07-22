@@ -62,6 +62,8 @@ public:
     map_.add("obstacle_inflated");
     map_.add("observed", 0.0f);   // 0 = not observed, 1 = observed
     map_.add("sdf");
+    map_.add("sdf_grad_x");
+    map_.add("sdf_grad_y");
     map_.setGeometry(
         grid_map::Length(size_x_, size_y_),
         resolution_,
@@ -283,6 +285,26 @@ private:
   }
 
   /**
+   * @brief Computes the gradient of the smoothed SDF in meters.
+   * @param sdf_smooth The blurred SDF, in meters.
+   * @return {grad_x, grad_y} as a pair of CV_32F matrices, same size as sdf_smooth.
+   */
+  std::pair<cv::Mat, cv::Mat> compute_sdf_gradient(const cv::Mat& sdf_smooth)
+  {
+    cv::Mat grad_x, grad_y;
+
+    // ksize = 1 gives the un-smoothed central-difference kernel [-1, 0, 1].
+    cv::Sobel(sdf_smooth, grad_x, CV_32F, 1, 0, 1);
+    cv::Sobel(sdf_smooth, grad_y, CV_32F, 0, 1, 1);
+
+    double scale = 1.0 / (2.0 * map_.getResolution());
+    grad_x *= scale;
+    grad_y *= scale;
+
+    return {grad_x, grad_y};
+  }
+
+  /**
    * @brief Publishes SDF GridMap by computing a smooth SDF from a point cloud
    * @param cloud_msg The point cloud message
    * @param odom_msg The robots odometry.
@@ -350,6 +372,7 @@ private:
 
     // Use Gaussian blur to create a smooth sdf from a grid
     cv::Mat sdf_smooth = apply_guassian_blur(dist_to_obstacle, dist_to_free);
+    auto [grad_x, grad_y] = compute_sdf_gradient(sdf_smooth); // get gradients from sdf
 
     // Add sdf layer into the gridmap
     for (int i = 0; i < rows; ++i) {
@@ -358,6 +381,8 @@ private:
         grid_map::Index buffer_index =
             grid_map::getBufferIndexFromIndex(unwrapped_index, buffer_size, buffer_start);
         map_.at("sdf", buffer_index) = sdf_smooth.at<float>(i, j);
+        map_.at("sdf_grad_x", buffer_index) = grad_x.at<float>(i, j);
+        map_.at("sdf_grad_y", buffer_index) = grad_y.at<float>(i, j);
       }
     }
 
