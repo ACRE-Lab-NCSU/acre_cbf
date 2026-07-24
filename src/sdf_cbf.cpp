@@ -65,6 +65,8 @@ public:
     map_.add("obstacle_inflated", 0.0f);
     map_.add("sdf");
     map_.add("sdf_gaussian");
+    map_.add("sdf_grad_x");
+    map_.add("sdf_grad_y");
     map_.setGeometry(
         grid_map::Length(size_x_, size_y_),
         resolution_,
@@ -112,13 +114,13 @@ private:
       RCLCPP_ERROR(this->get_logger(), "resolution must be > 0, got %f.", resolution_);
       throw std::runtime_error("Invalid resolution parameter");
     }
-    this->declare_parameter("size_x", 3.0);
+    this->declare_parameter("size_x", 5.08);
     this->get_parameter("size_x", size_x_);
     if (size_x_ <= 0.0) {
       RCLCPP_ERROR(this->get_logger(), "size_x must be > 0, got %f.", size_x_);
       throw std::runtime_error("Invalid size_x parameter");
     }
-    this->declare_parameter("size_y", 3.0);
+    this->declare_parameter("size_y", 4.78);
     this->get_parameter("size_y", size_y_);
     if (size_y_ <= 0.0) {
       RCLCPP_ERROR(this->get_logger(), "size_y must be > 0, got %f.", size_y_);
@@ -133,7 +135,7 @@ private:
       throw std::runtime_error("Invalid sigma parameter");
     }
 
-    this->declare_parameter("obstacle_inflation", 0.05);
+    this->declare_parameter("obstacle_inflation", 0.00);
     this->get_parameter("obstacle_inflation", obstacle_inflation_);
     if (obstacle_inflation_ < 0.0) {
       RCLCPP_ERROR(this->get_logger(), "obstacle_inflation must be >= 0, got %f.", obstacle_inflation_);
@@ -232,12 +234,6 @@ private:
         map_.at("obstacle", idx) = std::clamp(prior + increment, L_MIN, L_MAX);
       }
     }
-
-    // Accumulate log-odds evidence at each endpoint cell
-    for (const auto& ep : endpoints) {
-      float prior = std::isnan(map_.at("obstacle", ep.index)) ? 0.0f : map_.at("obstacle", ep.index);
-      map_.at("obstacle", ep.index) = std::clamp(prior + (ep.occupied ? L_OCC : L_FREE), L_MIN, L_MAX);
-    }
   }
 
   /**
@@ -284,8 +280,7 @@ private:
 
   /**
    * @brief Applies Guassian Blur to a discrete SDF.
-   * @param dist_to_obstacle Matrix of distances to obstacles in free space.
-   * @param dist_to_free Matrix of distances to free space from inside obstacle regions.
+   * @param sdf_meters The raw (unsmoothed) SDF, in meters.
    * @return A smooth sdf matrix
    */
   cv::Mat apply_guassian_blur(const cv::Mat& sdf_meters)
@@ -297,6 +292,26 @@ private:
     cv::GaussianBlur(sdf_meters, sdf_smooth, cv::Size(ksize, ksize), sigma_px);
 
     return sdf_smooth;
+  }
+
+  /**
+   * @brief Computes the gradient of the smoothed SDF in meters.
+   * @param sdf_smooth The blurred SDF, in meters.
+   * @return {grad_x, grad_y} as a pair of CV_32F matrices, same size as sdf_smooth.
+   */
+  std::pair<cv::Mat, cv::Mat> compute_sdf_gradient(const cv::Mat& sdf_smooth)
+  {
+    cv::Mat grad_x, grad_y;
+ 
+    // ksize = 1 gives the un-smoothed central-difference kernel [-1, 0, 1].
+    cv::Sobel(sdf_smooth, grad_x, CV_32F, 1, 0, 1);
+    cv::Sobel(sdf_smooth, grad_y, CV_32F, 0, 1, 1);
+ 
+    double scale = 1.0 / (2.0 * map_.getResolution());
+    grad_x *= scale;
+    grad_y *= scale;
+ 
+    return {grad_x, grad_y};
   }
 
   /**
@@ -384,6 +399,7 @@ private:
 
     // Use Gaussian blur to create a smooth sdf from a grid
     cv::Mat sdf_smooth = apply_guassian_blur(sdf_meters);
+    auto [grad_x, grad_y] = compute_sdf_gradient(sdf_smooth); // get gradients from smoothed sdf
 
     // Add sdf gaussian layer into the gridmap
     for (int i = 0; i < rows; ++i) {
@@ -392,6 +408,8 @@ private:
         grid_map::Index buffer_index =
             grid_map::getBufferIndexFromIndex(unwrapped_index, buffer_size, buffer_start);
         map_.at("sdf_gaussian", buffer_index) = sdf_smooth.at<float>(i, j);
+        map_.at("sdf_grad_x", buffer_index) = grad_x.at<float>(i, j);
+        map_.at("sdf_grad_y", buffer_index) = grad_y.at<float>(i, j);
       }
     }
 
