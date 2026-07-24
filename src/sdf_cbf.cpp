@@ -58,11 +58,13 @@ public:
     grid_map_pub_ = this->create_publisher<grid_map_msgs::msg::GridMap>("/acre/sdf_cbf", 10);
 
     // create map
-    // map_.add("elevation");
-    map_.add("obstacle");
-    map_.add("obstacle_inflated");
-    map_.add("observed", 0.0f);   // 0 = not observed, 1 = observed
+    // "obstacle" holds a log-odds occupancy value. 0.0 = neutral/unknown (p=0.5).
+    // Cells that have never been observed, or were just reset by map_.move(),
+    // are NaN, which naturally falls outside both the occupied/free thresholds below.
+    map_.add("obstacle", 0.0f);
+    map_.add("obstacle_inflated", 0.0f);
     map_.add("sdf");
+    map_.add("sdf_gaussian");
     map_.setGeometry(
         grid_map::Length(size_x_, size_y_),
         resolution_,
@@ -185,9 +187,9 @@ private:
       footprint.addVertex(grid_map::Position(wx, wy));
     }
 
+    // The robot's footprint is free so we make it as L_MIN
     for (grid_map::PolygonIterator it(map_, footprint); !it.isPastEnd(); ++it) {
-      map_.at("observed", *it) = OBSERVED;
-      map_.at("obstacle", *it) = FREE_VALUE;
+      map_.at("obstacle", *it) = L_MIN;
     }
   }
 
@@ -199,6 +201,7 @@ private:
   void raytrace_points(grid_map::Position& robot_pos, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc) {
     grid_map::Index robot_index;
     bool have_robot_index = map_.getIndex(robot_pos, robot_index);
+    if (!have_robot_index) return;
 
     // classify every point
     std::vector<Endpoint> endpoints;
@@ -214,22 +217,26 @@ private:
       endpoints.push_back({end_index, static_cast<float>(height_above_ground), occupied});
     }
 
-    // Raytrace from robots position to every point in the cropped map. We mark every cell along the path as free
-    if (have_robot_index) {
-      for (const auto& ep : endpoints) {
-        for (grid_map::LineIterator line(map_, robot_index, ep.index); !line.isPastEnd(); ++line) {
-          grid_map::Index idx(*line);
-          map_.at("observed", idx) = OBSERVED;
-          map_.at("obstacle", idx) = FREE_VALUE;
-        }
+    // Raytrace from robots position to every point in the cropped map. We accumulate
+    // log-odds evidence of "free" for every cell along the path
+    // Bayesian update: l(mk|z1:t) = l(mk|z1:t-1) + l(mk|zt)).
+    for (const auto& ep : endpoints) {
+      grid_map::LineIterator line(map_, robot_index, ep.index);
+      for (; !line.isPastEnd(); ++line) {
+        grid_map::Index idx(*line);
+
+        bool is_endpoint = (idx(0) == ep.index(0) && idx(1) == ep.index(1));
+        float increment = is_endpoint ? (ep.occupied ? L_OCC : L_FREE) : L_FREE;
+
+        float prior = std::isnan(map_.at("obstacle", idx)) ? 0.0f : map_.at("obstacle", idx);
+        map_.at("obstacle", idx) = std::clamp(prior + increment, L_MIN, L_MAX);
       }
     }
 
-    // Mark cells that contain points from the PC as occupied
+    // Accumulate log-odds evidence at each endpoint cell
     for (const auto& ep : endpoints) {
-      // map_.at("elevation", ep.index) = ep.elevation;
-      map_.at("observed", ep.index) = OBSERVED; // mark the cell as observed
-      map_.at("obstacle", ep.index) = ep.occupied ? OCCUPIED_VALUE : FREE_VALUE;
+      float prior = std::isnan(map_.at("obstacle", ep.index)) ? 0.0f : map_.at("obstacle", ep.index);
+      map_.at("obstacle", ep.index) = std::clamp(prior + (ep.occupied ? L_OCC : L_FREE), L_MIN, L_MAX);
     }
   }
 
@@ -265,16 +272,24 @@ private:
   }
 
   /**
+   * @brief Decays accumulated log-odds confidence toward neutral (0.0) each frame,
+   *        so that stale evidence (e.g. from objects that have since moved) fades
+   *        out over time rather than persisting until directly overwritten.
+   */
+  void decay_obstacle_layer()
+  {
+    grid_map::Matrix& obstacle_layer = map_["obstacle"];
+    obstacle_layer *= DECAY_FACTOR;
+  }
+
+  /**
    * @brief Applies Guassian Blur to a discrete SDF.
    * @param dist_to_obstacle Matrix of distances to obstacles in free space.
    * @param dist_to_free Matrix of distances to free space from inside obstacle regions.
    * @return A smooth sdf matrix
    */
-  cv::Mat apply_guassian_blur(const cv::Mat& dist_to_obstacle, const cv::Mat& dist_to_free)
+  cv::Mat apply_guassian_blur(const cv::Mat& sdf_meters)
   {
-    cv::Mat sdf_cells = dist_to_obstacle - dist_to_free;
-    cv::Mat sdf_meters = sdf_cells * map_.getResolution();
-
     // Use Gaussian blur to create a smooth sdf from a grid
     double sigma_px = sigma_ / map_.getResolution();
     int ksize = 2 * static_cast<int>(std::ceil(3.0 * sigma_px)) + 1; // kernal size needs to be odd
@@ -296,6 +311,8 @@ private:
     grid_map::Position robot_pos(odom_msg->pose.pose.position.x,
                                   odom_msg->pose.pose.position.y);
     map_.move(robot_pos);
+
+    decay_obstacle_layer(); 
 
     // convert and crop point cloud
     pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud(new pcl::PointCloud<pcl::PointXYZ>);
@@ -333,13 +350,16 @@ private:
       const grid_map::Index unwrapped_index =
           grid_map::getIndexFromBufferIndex(buffer_index, buffer_size, buffer_start);
 
-      bool observed = map_.at("observed", buffer_index) > 0.5f;
-      bool occupied = observed && (map_.at("obstacle", buffer_index) > 0.5f);
+      const float log_odds = map_.at("obstacle", buffer_index);
+      bool occupied = log_odds > OCCUPIED_THRESHOLD;
+      bool free     = log_odds < FREE_THRESHOLD;
 
+      // Unknown cells are left out of both masks (0 in each), so the distance
+      // transform below treats them as neither obstacle or free 
       not_free_u8.at<uint8_t>(unwrapped_index(0), unwrapped_index(1)) =
-          (occupied || !observed) ? OCCUPIED_VALUE : FREE_VALUE;
+          occupied ? OCCUPIED_VALUE : FREE_VALUE;
       free_u8.at<uint8_t>(unwrapped_index(0), unwrapped_index(1)) =
-          (observed && !occupied) ? OCCUPIED_VALUE : FREE_VALUE;
+          free ? OCCUPIED_VALUE : FREE_VALUE;
     }
 
     // Inflate obstacles using dilation
@@ -350,16 +370,28 @@ private:
     cv::distanceTransform(OCCUPIED_VALUE - not_free_inflated, dist_to_obstacle, cv::DIST_L2, cv::DIST_MASK_PRECISE); // zero at not_free
     cv::distanceTransform(OCCUPIED_VALUE - free_u8,           dist_to_free,     cv::DIST_L2, cv::DIST_MASK_PRECISE); // zero at free
 
-    // Use Gaussian blur to create a smooth sdf from a grid
-    cv::Mat sdf_smooth = apply_guassian_blur(dist_to_obstacle, dist_to_free);
-
     // Add sdf layer into the gridmap
+    cv::Mat sdf_cells = dist_to_obstacle - dist_to_free;
+    cv::Mat sdf_meters = sdf_cells * map_.getResolution();
     for (int i = 0; i < rows; ++i) {
       for (int j = 0; j < cols; ++j) {
         grid_map::Index unwrapped_index(i, j);
         grid_map::Index buffer_index =
             grid_map::getBufferIndexFromIndex(unwrapped_index, buffer_size, buffer_start);
-        map_.at("sdf", buffer_index) = sdf_smooth.at<float>(i, j);
+        map_.at("sdf", buffer_index) = sdf_meters.at<float>(i, j);
+      }
+    }
+
+    // Use Gaussian blur to create a smooth sdf from a grid
+    cv::Mat sdf_smooth = apply_guassian_blur(sdf_meters);
+
+    // Add sdf gaussian layer into the gridmap
+    for (int i = 0; i < rows; ++i) {
+      for (int j = 0; j < cols; ++j) {
+        grid_map::Index unwrapped_index(i, j);
+        grid_map::Index buffer_index =
+            grid_map::getBufferIndexFromIndex(unwrapped_index, buffer_size, buffer_start);
+        map_.at("sdf_gaussian", buffer_index) = sdf_smooth.at<float>(i, j);
       }
     }
 
@@ -381,8 +413,21 @@ private:
 
   static constexpr int OCCUPIED_VALUE = 255;
   static constexpr int FREE_VALUE = 0;
-  static constexpr int OBSERVED = 1;
   static constexpr double GROUND_PLANE_ = -0.37;
+
+  // log-odds increments for inverse sensor model
+  static constexpr float L_OCC = 0.85f;   // positive: evidence of occupancy per hit
+  static constexpr float L_FREE = -0.4f;  // negative: evidence of free space per ray pass-through
+
+  // clamp bounds to prevent runaway confidence
+  static constexpr float L_MIN = -2.0f;
+  static constexpr float L_MAX = 3.5f;
+
+  // classification thresholds on the accumulated log-odds value.
+  static constexpr float OCCUPIED_THRESHOLD = 1.5f;  // ~p=0.82
+  static constexpr float FREE_THRESHOLD = -0.7f;     // ~p=0.33
+
+  static constexpr float DECAY_FACTOR = 0.98f;
 
   std::string point_cloud_topic_;
   std::string odom_topic_;
