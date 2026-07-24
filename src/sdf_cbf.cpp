@@ -115,11 +115,13 @@ private:
       throw std::runtime_error("Invalid resolution parameter");
     }
     this->declare_parameter("size_x", 5.08);
+    this->declare_parameter("size_x", 5.08);
     this->get_parameter("size_x", size_x_);
     if (size_x_ <= 0.0) {
       RCLCPP_ERROR(this->get_logger(), "size_x must be > 0, got %f.", size_x_);
       throw std::runtime_error("Invalid size_x parameter");
     }
+    this->declare_parameter("size_y", 4.78);
     this->declare_parameter("size_y", 4.78);
     this->get_parameter("size_y", size_y_);
     if (size_y_ <= 0.0) {
@@ -135,6 +137,7 @@ private:
       throw std::runtime_error("Invalid sigma parameter");
     }
 
+    this->declare_parameter("obstacle_inflation", 0.00);
     this->declare_parameter("obstacle_inflation", 0.00);
     this->get_parameter("obstacle_inflation", obstacle_inflation_);
     if (obstacle_inflation_ < 0.0) {

@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libeigen3-dev \
     libopencv-dev \
+    ros-humble-rmw-cyclonedds-cpp \
+    ros-humble-rosidl-generator-dds-idl \
     ros-humble-pcl-ros \
     ros-humble-pcl-conversions \
     libpcl-dev \
@@ -20,6 +22,12 @@ RUN apt-get update && apt-get install -y \
     ros-humble-nav-msgs \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
+
+# Clone and build Unitree CycloneDDS packages
+RUN git clone https://github.com/unitreerobotics/unitree_ros2.git /opt/unitree_ros2 && \
+    cd /opt/unitree_ros2/cyclonedds_ws && \
+    . /opt/ros/humble/setup.sh && \
+    CC=gcc CXX=g++ colcon build --symlink-install
 
 # ANYbotics grid_map
 RUN mkdir -p /opt/anybotics_ws/src && \
@@ -37,6 +45,7 @@ RUN printf '#!/bin/bash\n\
 set -e\n\
 source /opt/ros/humble/setup.sh\n\
 source /opt/anybotics_ws/install/setup.bash\n\
+source /opt/unitree_ros2/cyclonedds_ws/install/setup.bash\n\
 if [ -d /ros2_ws/src ]; then\n\
   cd /ros2_ws\n\
   rosdep install --from-paths src --ignore-src -y || true\n\
